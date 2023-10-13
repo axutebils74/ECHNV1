@@ -1,0 +1,243 @@
+<meta charset="UTF-8">
+<title>ECHNV1</title>
+<script>
+    onerror = function (e){
+        div.innerHTML = e
+    }
+    onunhandledrejection = function(e){
+        div.innerHTML = e.reason
+    }
+</script>
+<h3>导出JSON</h3>
+<input type="file" id="ff"  oninput="exportJSON()" webkitdirectory> 需要保证目录的文件均是echnv1格式的，记得修改URL <br>
+<details>
+    <summary>其他配置</summary>
+    <fieldset>
+        <legend>寻找</legend>
+        <input type="number" id="d1" value="16384">从后寻找块大小<br>
+        <input type="number" id="d2" value="1024">从前寻找块大小<br>
+        <input type="number" id="d3" value="0"> algo算法仅支持 (0,1,2) <br>
+        0:原样，
+        1:hash512转为16进制，
+        2：hash512转为16进制后截取长度32的字符串 <br>
+        <input type="checkbox" id="d4"> 使用info信息
+    </fieldset>
+</details>
+<hr>
+<div id="div"></div>
+<script src="nacl.fast.min.js"></script>
+<script src="lzma.js"></script>
+<script src="xor.js"></script>
+<script>
+var exjson = {},useInfo;
+lzma = LZMA();
+var k,i = 256;
+crcTable = []
+for (; i--; crcTable[i] = k) {
+    k = i
+    for (j = 8; j--; ) k = (k & 1) ? 0xedb88320 ^ (k >>> 1) : (k >>> 1)
+}
+function crc32(data,i,j){
+    var crc = -1;
+    for (var k = 0; k < j; k++) {
+        crc = (crc >>> 8) ^ crcTable[(crc ^ data[i+k]) & 0xff]
+    }
+    return crc;
+}
+function get32(data,i){
+    return data[i] << 24 | data[i+1] << 16 | data[i+2] << 8 | data[i+3]; 
+}
+async function exportJSON(){
+    if(!(d3.value in ["0","1","2"])) throw new Error("仅支持0,1,2")
+    useInfo = d4.checked;
+    if(useInfo){
+        exjson = {
+            algo:+d3.value,
+            info:[],
+            content:{
+
+            }
+         }
+    }else{
+        exjson = {
+            algo:+d3.value,
+            url:[],
+            pwd:[],
+            content:{
+
+            }
+         }
+    }
+
+    for(var i = 0; i <ff.files.length;i++){
+        ff.files[i].path = ff.files[i].webkitRelativePath.replace(/^[^/]+\//,'');
+        await readJSON(ff.files[i])
+    }
+    let a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(exjson)],{type:"application/json"}));
+    a.download = 'export.json'
+    a.click();
+}
+async function readJSON(ff1){
+    if(!ff1) return
+    var kkk = {}
+    config = {}
+    config.allowPlain = true
+    zip = new Uint8Array(await new Blob([ff1.slice(-(parseInt(d1.value)||16384)),ff1.slice(0,(parseInt(d1.value)||1024))]).arrayBuffer());
+    i = zip.length - 17;
+    while (true) {
+        if (i < 0) throw new Error('NO HIDDEN INFORMATION');
+        if (zip[i] != 0x16) {--i;continue;}
+        if (get32(zip,i) == 0x16454235) {
+            if(crc32(zip,i+4,9)^zip.length == get32(zip,i+13)) break
+        }
+        --i;
+    }
+    pwd = ""
+    offset = get32(zip,i+4);
+    kkk.offset = offset
+    size = get32(zip,i+8);
+    kkk.size = size;
+    kkk.url = ff1.path
+    encryptType = zip[i+12];
+    config.enc = encryptType & 3;
+    if(encryptType) {
+        config.encInfo = +!!(encryptType & 4)
+        config.mulKey = +!!(encryptType & 8)
+    }
+    if(config.enc) {
+       pwd = prompt("请输入" + ff1.path + "的任意一个密码");
+    }
+    kkk.pwd = pwd;
+    kkk.enc = encryptType
+
+    k = ff1.slice(offset,offset+size);
+    epz = {}
+    r = new DataView(await k.slice(0,8).arrayBuffer())
+    magic = r.getInt32();
+    if(magic === 1162893886){
+        var len = r.getUint32(4);
+        epz.i = len + 8
+        epz.l = 8 
+        epz.u = len + 8
+    }else if(magic === 1162893825){
+        epz.h = 1;
+        var len = r.getUint32(4);
+        epz.i = len + 8
+        epz.l = 8 
+        epz.u = len + 8
+    }else if(magic === 1162893826){
+        var len = new DataView(await k.slice(k.size-4).arrayBuffer()).getInt32();
+        epz.i = 4
+        epz.l = k.size-len-4
+        epz.u = k.size-4
+    }else if(magic === 1162893827){
+        var len = new DataView(await k.slice(k.size-4).arrayBuffer()).getInt32();
+        epz.i = 4
+        epz.h = 1;
+        epz.l = k.size-len-4
+        epz.u = k.size-4
+    }else{
+        throw new Error('Not EPZ file');
+    }
+    function getskKey(u8,str){
+        var len = u8[0];
+        var auth_str = String.fromCharCode.apply(null,u8.subarray(1,65));
+        var data = nacl.hash(utf8encode(str));
+        for(var i = 65,j=0;j < len;j++,i+=56){
+            var x = xor3d(u8.subarray(i,i+56),data);
+            var b = auth(x);
+            if(auth_str == String.fromCharCode.apply(null,b)){
+                config.sk = x;
+                config.key = nacl.hash(x);
+            }
+        }
+        if(!config.sk) throw new Error("密码错误");
+        return len * 56 + 65;
+    }
+    
+    n = new Uint8Array(await k.slice(epz.l,epz.u).arrayBuffer())
+    var i = 0;
+    if(encryptType){
+        if(config.mulKey){
+            var skip =  getskKey(n,pwd);
+            n = n.subarray(skip);
+            if(epz.i == 4) epz.i+=skip;
+        }else{
+            singleKey(pwd);
+        }
+    }
+    if(config.encInfo) n = decodeA(n);
+    if(epz.h) n = lzma.decompress(n);
+    var i = 0;
+    function readVLQ(){
+        var r = 0, e;
+        do {
+            e=n[i++];
+            r = (r << 7) | (e & 127);
+        }while(e & 128);
+        return r;
+    }
+    function readName(){
+        j = i
+        while(n[i++]){}
+        return new TextDecoder().decode(n.subarray(j,i-1))
+    }
+    function readByte(){
+        return n[i++];
+    }
+    var c = epz.i;
+    len = readVLQ()
+    var arr = []
+    for(o=0;o<len;o++){
+        size =  readVLQ();
+        filename = readName();
+        compressmethod = readByte(); 
+        arr.push({
+            l:c,
+            u:c+=size,
+            name:filename,
+            method:compressmethod
+        })
+    }
+    len = readVLQ()
+    for(o=0;o<len;o++){
+        refer =  readVLQ();
+        filename = readName();
+        arr.push({
+            refer:refer,
+            name:filename,
+        })
+    }
+    var len
+    if(useInfo){
+        len = exjson.info.length;
+        exjson.info.push(kkk);
+    }  else{
+        len = exjson.url.length;
+        exjson.url.push(ff1.path);
+        exjson.pwd.push(pwd);
+    }
+
+    for(var i = 0;i < arr.length;i++){
+        div.innerHTML = ff1.path + ": " + i + '/' + arr.length;
+        j = arr[i].refer ? arr[i].refer-1 : i;  
+        if(j == -1) {continue;}
+        e = arr[j]
+        exjson.content[getalgo(arr[i].name)] = len;
+    }
+     div.innerHTML = ff1.path + ": " + arr.length + '/' + arr.length;
+
+}
+function getalgo(e){
+    if(d3.value == 0){return e}
+    if(d3.value == 1){
+        var r = nacl.hash(new TextEncoder().encode(e));
+        return Array.prototype.map.call(r, x => ('00' + x.toString(16)).slice(-2)).join(''); 
+    }
+    if(d3.value == 2){
+        var r = nacl.hash(new TextEncoder().encode(e)).subarray(0,16);
+        return Array.prototype.map.call(r, x => ('00' + x.toString(16)).slice(-2)).join(''); 
+    }
+}
+</script>
